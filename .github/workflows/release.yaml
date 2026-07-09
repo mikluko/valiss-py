@@ -15,10 +15,10 @@ jobs:
     permissions:
       id-token: write
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
 
     - name: Setup uv
-      uses: astral-sh/setup-uv@v5
+      uses: astral-sh/setup-uv@v8
 
     - name: Check tag matches project version
       run: |

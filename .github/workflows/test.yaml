@@ -12,25 +12,25 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
       with:
         path: valiss-py
 
     # Sibling checkout of the Go implementation so the cross-language
     # interop suite runs instead of skipping.
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
       with:
         repository: mikluko/valiss
         path: valiss
 
     - name: Setup Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v6
       with:
         go-version-file: valiss-py/tests/interop/go.mod
         cache-dependency-path: valiss-py/tests/interop/go.sum
 
     - name: Setup uv
-      uses: astral-sh/setup-uv@v5
+      uses: astral-sh/setup-uv@v8
 
     - name: Install dependencies
       working-directory: valiss-py
