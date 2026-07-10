@@ -30,7 +30,7 @@ jobs:
         cache-dependency-path: valiss-py/tests/interop/go.sum
 
     - name: Setup uv
-      uses: astral-sh/setup-uv@v8
+      uses: astral-sh/setup-uv@v8.3.2
 
     - name: Install dependencies
       working-directory: valiss-py
