@@ -26,16 +26,18 @@ Minting short-lived user tokens from an account seed:
 Submodules mirror the Go package layout: token (mint, request signing,
 per-token verify helpers), message (per-message proof-of-origin tokens and
 their full-chain verification), creds (creds file), nkeys (Ed25519 nkeys),
-httpauth and grpcauth (client transport adapters and their extension
-claims). grpcauth requires the ``grpc`` extra; httpauth.Auth requires the
-``httpx`` extra.
+httpauth and grpcauth (transport adapters — client credential attachment, the
+extension claim, and server middleware — for HTTP and gRPC). grpcauth requires
+the ``grpc`` extra; httpauth.Auth requires the ``httpx`` extra, the HTTP server
+middleware the ``django`` or ``fastapi`` extra.
 
 Server-side request verification lives in verifier (the integrated Verifier:
 chain + allowlist/revocation + epoch policy + replay + extension enforcement +
 custom validators), backed by allowlist (accepted account-token ids), replay
 (nonce suppression), and keyring (multi-operator trust via
 ``Verifier.with_keyring``); a Python service turns request headers into a
-verified Identity without a round-trip to Go.
+verified Identity without a round-trip to Go. The transport adapters wrap it:
+``httpauth`` for Django and any ASGI app, ``grpcauth`` for grpcio.
 
 Tokens, creds files, and request signatures each carry their own wire-format
 version. The current version is 1 (SPEC-1.md); it appears on the wire only as

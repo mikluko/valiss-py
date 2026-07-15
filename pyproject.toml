@@ -1,6 +1,6 @@
 [project]
 name = "valiss"
-version = "0.5.0"
+version = "0.6.0"
 description = "valiss tenant authentication: nkey-signed HTTP and gRPC requests with server-side verification (wire spec 1)"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -54,7 +54,8 @@ exclude = [
     "src/valiss/httpauth/_client.py",
     "src/valiss/httpauth/django.py",
     "src/valiss/httpauth/asgi.py",
-    "src/valiss/grpcauth.py",
+    "src/valiss/grpcauth/_client.py",
+    "src/valiss/grpcauth/interceptor.py",
 ]
 pythonVersion = "3.11"
 typeCheckingMode = "standard"
