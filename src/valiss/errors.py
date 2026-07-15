@@ -9,14 +9,22 @@ implementation; conformance and cross-implementation comparisons key off
 
 from __future__ import annotations
 
+from enum import StrEnum
 
-class Reason:
+
+class Reason(StrEnum):
     """Stable spec §7 reason codes.
 
     A conformant verifier distinguishes these failure conditions so negative
     conformance vectors can assert the same reason across implementations. The
     codes mirror SPEC-1.md §7 verbatim; an implementation may subdivide
     internally but every failure reduces to one of these.
+
+    A :class:`StrEnum`, so each member *is* its wire string —
+    ``Reason.MALFORMED == "malformed"`` and ``str(Reason.MALFORMED) ==
+    "malformed"`` — giving static exhaustiveness and IDE completion while
+    staying byte-compatible with code and vectors that compare against the raw
+    strings.
     """
 
     # §7.1 envelope / decode
@@ -68,6 +76,6 @@ class ValissError(Exception):
     example minting a token with the wrong key level).
     """
 
-    def __init__(self, message: str, *, reason: str | None = None):
+    def __init__(self, message: str, *, reason: Reason | None = None):
         super().__init__(message)
         self.reason = reason

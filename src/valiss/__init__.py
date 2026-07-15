@@ -28,8 +28,13 @@ per-token verify helpers), message (per-message proof-of-origin tokens and
 their full-chain verification), creds (creds file), nkeys (Ed25519 nkeys),
 httpauth and grpcauth (client transport adapters and their extension
 claims). grpcauth requires the ``grpc`` extra; httpauth.Auth requires the
-``httpx`` extra. Server-side request-chain verification (allowlist, epoch
-policy, replay) stays with the Go implementation.
+``httpx`` extra.
+
+Server-side request verification lives in verifier (the integrated Verifier:
+chain + allowlist/revocation + epoch policy + replay + extension enforcement +
+custom validators), backed by allowlist (accepted account-token ids) and
+replay (nonce suppression); a Python service turns request headers into a
+verified Identity without a round-trip to Go.
 
 Tokens, creds files, and request signatures each carry their own wire-format
 version. The current version is 1 (SPEC-1.md); it appears on the wire only as

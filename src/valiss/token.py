@@ -41,7 +41,7 @@ import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Protocol
+from typing import Any, Protocol, Self, TypeVar
 
 from . import nkeys
 from .errors import Reason, ValissError
@@ -157,6 +157,54 @@ class RawExtension:
 
     def extension_payload(self) -> Mapping[str, Any]:
         return self.payload
+
+
+class DecodableExtension(Protocol):
+    """A verification-side extension: it names itself (the zero value reports
+    the name, as for the mint-side :class:`Extension`) and decodes a JSON
+    payload into a typed instance. Transport extensions (``httpauth.Ext``,
+    ``grpcauth.Ext``) and consumer extensions implement it so a verifier can
+    enforce them and a handler can read them back with :func:`ext_of`."""
+
+    def extension_name(self) -> str: ...
+
+    @classmethod
+    def decode(cls, payload: Mapping[str, Any], /) -> Self: ...
+
+
+_Ext = TypeVar("_Ext", bound=DecodableExtension)
+
+
+def covered(granted: Iterable[str], required: str) -> bool:
+    """Whether any granted pattern covers ``required``, honoring a trailing
+    ``*`` prefix wildcard (so ``"/v1/*"`` covers ``"/v1/x"`` and ``"*"`` covers
+    everything). The transport extensions use it for paths and methods; mirrors
+    Go ``Covered``/``scopeMatch``."""
+    for pattern in granted:
+        if pattern.endswith("*"):
+            if required.startswith(pattern[:-1]):
+                return True
+        elif pattern == required:
+            return True
+    return False
+
+
+def ext_of(ext: Mapping[str, Any], ext_type: type[_Ext]) -> _Ext | None:
+    """Decode the extension named by ``ext_type``'s zero value out of an ``ext``
+    map, or ``None`` when absent. Raises :class:`ValissError` with
+    ``reason=extension_invalid`` on a malformed payload. The typed Python analog
+    of Go ``ExtOf[T]``; ``ext_type`` must be zero-constructible (as the
+    dataclass extensions are)."""
+    name = ext_type().extension_name()
+    payload = ext.get(name)
+    if payload is None:
+        return None
+    try:
+        return ext_type.decode(payload)
+    except (ValueError, TypeError, KeyError) as exc:
+        raise ValissError(
+            f"valiss: decode extension {name!r}: {exc}", reason=Reason.EXTENSION_INVALID
+        ) from exc
 
 
 @dataclass

@@ -106,6 +106,41 @@ per-call signature is bound to the called method;
 `grpcauth.call_credentials(c, nonce=True)` adds per-call nonces for
 replay-cache servers.
 
+## Server: verify a request
+
+A Python service can authenticate a request itself — no round-trip to Go. The
+`Verifier` pins the operator key and turns the credential a transport pulled
+off a request into a verified `Identity`: it verifies the account token, checks
+expiry/epoch, the allowlist (revocation), the optional user-token chain, and
+the request signature (or a bearer waiver), and suppresses replay.
+
+```python
+from valiss.verifier import Verifier, Request
+from valiss.allowlist import StaticAllowlist
+from valiss.replay import MemoryReplayCache
+
+verifier = Verifier(
+    operator_pub,                      # the pinned trust anchor
+    StaticAllowlist(account_jti),      # revocation: drop the id to revoke
+    replay_cache=MemoryReplayCache(),  # reject a replayed nonce
+)
+
+@verifier.validator                    # custom checks run after possession is proven
+def tenant_is_active(request, identity): ...
+
+@verifier.extension(httpauth.Ext)      # typed extension enforcement
+def enforce_paths(request, identity, account_ext, user_ext): ...
+
+identity = verifier.verify(Request(
+    account_token=..., user_token=..., timestamp=..., signature=..., context=..., nonce=...,
+))  # -> Identity(account, user, operator) | raises ValissError(reason=...)
+```
+
+Pass `operator_token=` to enforce the trust domain's epoch and validity window,
+or `resolver=` (a callable or `{account_pub: token}` mapping) to accept
+user-only credentials. `clock=` injects time in tests. Framework middleware
+(Django, FastAPI/ASGI) and the gRPC interceptor build on this and land next.
+
 ## Message tokens
 
 A **message token** is a short-lived, self-signed proof of origin: a user key
@@ -150,6 +185,10 @@ unrecognized version cleanly. On failure, `ValissError.reason` carries the spec
   per-token verify helpers for tooling and tests
 - `valiss.message` — message tokens (proof-of-origin) and their full-chain
   offline verification
+- `valiss.verifier` — the integrated request `Verifier` (chain + allowlist +
+  epoch + replay + extensions + validators), `Request`, `Identity`
+- `valiss.allowlist` / `valiss.replay` — account-token allowlist (revocation)
+  and nonce replay suppression
 - `valiss.creds` — client creds file (tokens + seed)
 - `valiss.nkeys` — minimal Ed25519 nkeys (operator/account/user)
 - `valiss.grpcauth` — gRPC call credentials and the `grpc` extension claim
