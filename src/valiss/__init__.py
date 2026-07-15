@@ -32,8 +32,9 @@ claims). grpcauth requires the ``grpc`` extra; httpauth.Auth requires the
 
 Server-side request verification lives in verifier (the integrated Verifier:
 chain + allowlist/revocation + epoch policy + replay + extension enforcement +
-custom validators), backed by allowlist (accepted account-token ids) and
-replay (nonce suppression); a Python service turns request headers into a
+custom validators), backed by allowlist (accepted account-token ids), replay
+(nonce suppression), and keyring (multi-operator trust via
+``Verifier.with_keyring``); a Python service turns request headers into a
 verified Identity without a round-trip to Go.
 
 Tokens, creds files, and request signatures each carry their own wire-format

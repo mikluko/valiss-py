@@ -30,6 +30,7 @@ from typing import Any
 from . import token
 from .allowlist import Allowlist
 from .errors import Reason, ValissError
+from .keyring import Keyring
 from .replay import ReplayCache
 
 # A resolver supplies the operator-signed account token for an account public
@@ -152,14 +153,9 @@ class Verifier:
         validators: Iterable[ClaimsValidator] = (),
         extension_types: Iterable[type[token.DecodableExtension]] = (),
     ):
+        self._configure(allowlist, skew, clock, resolver, replay_cache, validators, extension_types)
         self._operator_pub_key = operator_pub_key
-        self._allowlist = allowlist
-        self._skew = skew
-        self._now = clock or _utcnow
-        self._resolver = _as_resolver(resolver)
-        self._replay = replay_cache
-        self._validators: list[ClaimsValidator] = list(validators)
-        self._extension_types: list[type[token.DecodableExtension]] = list(extension_types)
+        self._keyring: Keyring | None = None
         self._operator: token.OperatorClaims | None = None
         self._operator_err: ValissError | None = None
         if operator_token is not None:
@@ -167,6 +163,52 @@ class Verifier:
                 self._operator = token.verify_operator(operator_token, operator_pub_key)
             except ValissError as exc:
                 self._operator_err = exc
+
+    @classmethod
+    def with_keyring(
+        cls,
+        keyring: Keyring,
+        allowlist: Allowlist,
+        *,
+        skew: timedelta = token.DEFAULT_SKEW,
+        clock: Callable[[], datetime] | None = None,
+        resolver: AccountTokenResolver | Mapping[str, str] | None = None,
+        replay_cache: ReplayCache | None = None,
+        validators: Iterable[ClaimsValidator] = (),
+        extension_types: Iterable[type[token.DecodableExtension]] = (),
+    ) -> Verifier:
+        """A verifier for a server trusting several operators (see
+        :class:`~valiss.keyring.Keyring`). The credential names its trust domain
+        — the account token's issuer and epoch select exactly one keyring entry
+        — and the request verifies under that entry's always-enforced policy
+        (its validity window and exact epoch). An unknown ``(issuer, epoch)``
+        pair is rejected. There is no ``operator_token`` option: entries carry
+        the policy."""
+        self = cls.__new__(cls)
+        self._configure(allowlist, skew, clock, resolver, replay_cache, validators, extension_types)
+        self._operator_pub_key = ""
+        self._keyring = keyring
+        self._operator = None
+        self._operator_err = None
+        return self
+
+    def _configure(
+        self,
+        allowlist: Allowlist,
+        skew: timedelta,
+        clock: Callable[[], datetime] | None,
+        resolver: AccountTokenResolver | Mapping[str, str] | None,
+        replay_cache: ReplayCache | None,
+        validators: Iterable[ClaimsValidator],
+        extension_types: Iterable[type[token.DecodableExtension]],
+    ) -> None:
+        self._allowlist = allowlist
+        self._skew = skew
+        self._now = clock or _utcnow
+        self._resolver = _as_resolver(resolver)
+        self._replay = replay_cache
+        self._validators: list[ClaimsValidator] = list(validators)
+        self._extension_types: list[type[token.DecodableExtension]] = list(extension_types)
 
     def validator(self, fn: ClaimsValidator) -> ClaimsValidator:
         """Register a custom check ``fn(request, identity)`` that raises to
@@ -229,8 +271,7 @@ class Verifier:
             account_pub_key = token.issuer_of(request.user_token)
             account_token = self._resolver(account_pub_key)
 
-        account = self._verify_account(account_token)
-        operator = self._operator
+        account, operator = self._anchor(account_token)
         now = self._now()
 
         if operator is not None:
@@ -311,7 +352,23 @@ class Verifier:
 
     __call__ = verify
 
-    def _verify_account(self, account_token: str) -> token.AccountClaims:
-        """Resolve the trust anchor and verify the account token against it.
-        Single-anchor: the pinned operator key. (A keyring overrides this.)"""
-        return token.verify_account(account_token, self._operator_pub_key)
+    def _anchor(
+        self, account_token: str
+    ) -> tuple[token.AccountClaims, token.OperatorClaims | None]:
+        """Resolve the trust anchor and verify the account token against it,
+        returning the account claims and the operator policy to enforce (None
+        for a single-anchor verifier with no operator token). A keyring selects
+        the entry the credential names — the account token's issuer and epoch —
+        with no trial; an unknown pair is rejected."""
+        if self._keyring is not None:
+            issuer = token.issuer_of(account_token)
+            account = token.verify_account(account_token, issuer)
+            operator = self._keyring.get(issuer, account.epoch)
+            if operator is None:
+                raise ValissError(
+                    f"valiss: no trusted operator {issuer} at epoch {account.epoch}",
+                    reason=Reason.UNKNOWN_OPERATOR,
+                )
+            return account, operator
+        account = token.verify_account(account_token, self._operator_pub_key)
+        return account, self._operator
