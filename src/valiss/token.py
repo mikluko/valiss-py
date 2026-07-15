@@ -37,6 +37,7 @@ import binascii
 import hashlib
 import json
 import os
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -72,6 +73,11 @@ _TOKEN_HEADER_V1 = '{"typ":"JWT","alg":"ed25519-nkey","ver":1}'
 # signature made under any other version rather than mis-verifying it.
 _REQUEST_PREFIX_V1 = "valiss-req-v1\n"
 
+# RFC 3339 (with optional nanosecond fraction), matching Go time.RFC3339Nano:
+# a 'T' separator and a 'Z' or colon-separated numeric offset, no space
+# separator and no lowercase 't'.
+_RFC3339NANO = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})")
+
 _OPERATOR_TYPE = "operator"
 _ACCOUNT_TYPE = "account"
 _USER_TYPE = "user"
@@ -86,12 +92,21 @@ def _b64url(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
+# The base64url alphabet (no padding). Go's base64.RawURLEncoding accepts only
+# these characters; in particular it rejects the standard-alphabet "+" and "/",
+# which Python's b64decode would otherwise fold onto "-"/"_".
+_B64URL_ALPHABET = re.compile(r"[A-Za-z0-9_-]*")
+
+
 def _b64url_decode(encoded: str) -> bytes:
-    """Strict base64url (no padding) decode. A non-alphabet character or bad
-    length is a malformed artifact, matching Go's base64.RawURLEncoding."""
+    """Strict base64url (no padding) decode, matching Go's
+    base64.RawURLEncoding: a character outside the base64url alphabet (including
+    the standard "+"/"/") or a bad length is a malformed artifact."""
+    if _B64URL_ALPHABET.fullmatch(encoded) is None:
+        raise ValissError("valiss: malformed token", reason=Reason.MALFORMED)
     pad = "=" * (-len(encoded) % 4)
     try:
-        return base64.b64decode(encoded + pad, altchars=b"-_", validate=True)
+        return base64.urlsafe_b64decode(encoded + pad)
     except (binascii.Error, ValueError) as exc:
         raise ValissError("valiss: malformed token", reason=Reason.MALFORMED) from exc
 
@@ -165,8 +180,11 @@ class Claims:
     not_before: datetime | None = None
 
     def expired(self, now: datetime, skew: timedelta = DEFAULT_SKEW) -> bool:
-        """Whether the token has passed its expiry (with skew slack)."""
-        return self.expires_at is not None and now > self.expires_at + skew
+        """Whether the token has passed its expiry (with skew slack). Written as
+        ``now - skew > exp`` (equivalent to ``now > exp + skew``) so the skew is
+        added to the bounded verification instant, never to an ``exp`` that may
+        sit near datetime's maximum."""
+        return self.expires_at is not None and now - skew > self.expires_at
 
     def not_yet_valid(self, now: datetime, skew: timedelta = DEFAULT_SKEW) -> bool:
         """Whether the token's not-before still lies in the future (with
@@ -431,7 +449,10 @@ def _peek_version(token: str) -> tuple[int, list[str]]:
             reason=Reason.UNSUPPORTED_TYPE,
         )
     ver = header.get("ver", 0)
-    if not isinstance(ver, int) or isinstance(ver, bool):
+    # ver must be a JSON integer in Go's int range; a bool, a float, or an
+    # out-of-range number fails Go's header unmarshal (malformed) rather than
+    # dispatching to an unsupported version.
+    if isinstance(ver, bool) or not isinstance(ver, int) or ver < _INT64_MIN or ver > _INT64_MAX:
         raise ValissError("valiss: malformed token header version", reason=Reason.MALFORMED)
     return ver, parts
 
@@ -450,17 +471,19 @@ def _decode_token(token: str) -> _Decoded:
 
 def _decode_v1(parts: list[str]) -> _Decoded:
     """Parse a version-1 payload, verify the signature, and normalize into
-    _Decoded. The valiss body is read through the union of every level's
-    fields; a level's absent fields stay at their zero value."""
+    _Decoded. Field types are validated up front (a wrong type is malformed),
+    then the issuer key is decoded and the signature verified — the same order
+    as Go's typed json.Unmarshal, so a type/shape error is reported as
+    malformed before signature verification rather than mis-parsed."""
     try:
         payload = json.loads(_b64url_decode(parts[1]))
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise ValissError(f"valiss: token claims: {exc}", reason=Reason.MALFORMED) from exc
     if not isinstance(payload, dict):
         raise ValissError("valiss: token claims: not an object", reason=Reason.MALFORMED)
-    issuer = payload.get("iss") or ""
+    d = _decoded_of(payload)
     try:
-        kp = nkeys.from_public_key(issuer)
+        kp = nkeys.from_public_key(d.issuer)
     except ValissError as exc:
         raise ValissError(f"valiss: token issuer: {exc}", reason=Reason.BAD_ISSUER_KEY) from exc
     sig = _b64url_decode(parts[2])
@@ -470,48 +493,89 @@ def _decode_v1(parts: list[str]) -> _Decoded:
         raise ValissError(
             "valiss: token signature verification failed", reason=Reason.BAD_SIGNATURE
         ) from exc
-    return _decoded_of(payload)
+    return d
 
 
-def _int(value: Any) -> int:
-    if not value:
+# Go decodes iat/exp/nbf as int64 and epoch as uint64; a value outside the type
+# range (or a non-integer JSON number) fails the unmarshal. Timestamps are
+# additionally bounded to what datetime can represent (roughly years 1..9999),
+# so a value Go would accept but Python cannot render is rejected cleanly
+# instead of raising OverflowError.
+_INT64_MIN = -(2**63)
+_INT64_MAX = 2**63 - 1
+_UINT64_MAX = 2**64 - 1
+_TS_MIN = -62135596800  # 0001-01-01T00:00:00Z
+_TS_MAX = 253402300799  # 9999-12-31T23:59:59Z
+
+
+def _wire_str(obj: dict[str, Any], key: str) -> str:
+    """A JSON string field, or "" when absent/null; any other JSON type is a
+    malformed token (Go unmarshals these into string fields)."""
+    v = obj.get(key)
+    if v is None:
+        return ""
+    if not isinstance(v, str):
+        raise ValissError(f"valiss: token claims: {key} is not a string", reason=Reason.MALFORMED)
+    return v
+
+
+def _wire_int(obj: dict[str, Any], key: str, lo: int, hi: int) -> int:
+    """A JSON integer field in [lo, hi], or 0 when absent/null; a non-integer
+    (including a bool or a float) or out-of-range value is malformed."""
+    v = obj.get(key)
+    if v is None:
         return 0
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return 0
+    if isinstance(v, bool) or not isinstance(v, int) or v < lo or v > hi:
+        raise ValissError(f"valiss: token claims: {key} is not a valid integer", reason=Reason.MALFORMED)
+    return v
+
+
+def _wire_bool(obj: dict[str, Any], key: str) -> bool:
+    """A JSON boolean field, or False when absent/null; any other type is
+    malformed (Go unmarshals bearer into a bool)."""
+    v = obj.get(key)
+    if v is None:
+        return False
+    if not isinstance(v, bool):
+        raise ValissError(f"valiss: token claims: {key} is not a boolean", reason=Reason.MALFORMED)
+    return v
+
+
+def _wire_obj(obj: dict[str, Any], key: str) -> dict[str, Any] | None:
+    """A JSON object field, or None when absent/null; any other type is
+    malformed (Go unmarshals chain/ext into a struct/map)."""
+    v = obj.get(key)
+    if v is None:
+        return None
+    if not isinstance(v, dict):
+        raise ValissError(f"valiss: token claims: {key} is not an object", reason=Reason.MALFORMED)
+    return v
 
 
 def _decoded_of(payload: dict[str, Any]) -> _Decoded:
-    body = payload.get("valiss")
-    if body is None:
-        body = {}
-    elif not isinstance(body, dict):
-        raise ValissError("valiss: token claims: valiss body is not an object", reason=Reason.MALFORMED)
-    chain = body.get("chain")
-    ext = body.get("ext")
+    body = _wire_obj(payload, "valiss") or {}
     return _Decoded(
-        id=payload.get("jti") or "",
-        issuer=payload.get("iss") or "",
-        subject=payload.get("sub") or "",
-        name=payload.get("name") or "",
-        audience=payload.get("aud") or "",
-        issued_at=_int(payload.get("iat")),
-        expires=_int(payload.get("exp")),
-        not_before=_int(payload.get("nbf")),
-        type=body.get("type") or "",
-        epoch=_int(body.get("epoch")),
-        bearer=bool(body.get("bearer")),
-        checksum=body.get("checksum") or "",
-        chain=chain if isinstance(chain, dict) else None,
-        ext=ext if isinstance(ext, dict) else {},
+        id=_wire_str(payload, "jti"),
+        issuer=_wire_str(payload, "iss"),
+        subject=_wire_str(payload, "sub"),
+        name=_wire_str(payload, "name"),
+        audience=_wire_str(payload, "aud"),
+        issued_at=_wire_int(payload, "iat", _TS_MIN, _TS_MAX),
+        expires=_wire_int(payload, "exp", _TS_MIN, _TS_MAX),
+        not_before=_wire_int(payload, "nbf", _TS_MIN, _TS_MAX),
+        type=_wire_str(body, "type"),
+        epoch=_wire_int(body, "epoch", 0, _UINT64_MAX),
+        bearer=_wire_bool(body, "bearer"),
+        checksum=_wire_str(body, "checksum"),
+        chain=_wire_obj(body, "chain"),
+        ext=_wire_obj(body, "ext") or {},
     )
 
 
 def _ts(value: int) -> datetime | None:
     if not value:
         return None
-    return datetime.fromtimestamp(int(value), tz=timezone.utc)
+    return datetime.fromtimestamp(value, tz=timezone.utc)
 
 
 def _claims_of(d: _Decoded) -> Claims:
@@ -657,14 +721,17 @@ def verify_signature(
     timestamp to a symmetric skew window around now, and confirm it was
     signed over the request context (see sign_request)."""
     now = now or _now()
+    # Go parses the timestamp with time.RFC3339Nano, which is stricter than
+    # datetime.fromisoformat: it requires the 'T' separator, a 'Z' or a
+    # colon-separated numeric offset, and rejects a space separator or a
+    # lowercase 't'. Gate on that shape so a non-RFC3339 timestamp maps to skew
+    # (as Go does) rather than sneaking through to the signature check.
+    if _RFC3339NANO.fullmatch(timestamp) is None:
+        raise ValissError("valiss: bad request timestamp", reason=Reason.SKEW)
     try:
         ts = datetime.fromisoformat(timestamp)
     except ValueError as exc:
         raise ValissError(f"valiss: bad request timestamp: {exc}", reason=Reason.SKEW) from exc
-    if ts.tzinfo is None:
-        raise ValissError(
-            "valiss: bad request timestamp: missing timezone offset", reason=Reason.SKEW
-        )
     drift = now - ts
     if drift > skew or drift < -skew:
         raise ValissError(

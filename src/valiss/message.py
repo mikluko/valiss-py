@@ -104,6 +104,12 @@ def issue_message(
             "valiss: message tokens must be signed by a user-type nkey (expected an SU... seed)"
         )
     now = now or token._now()
+    # Validate the option-carried claims first (checksum shape, extension
+    # names), matching Go's order where option errors surface before the
+    # expiry check.
+    if checksum and not _is_hex_sha256(checksum):
+        raise ValissError("valiss: checksum must be the lowercase-hex SHA-256 of the payload")
+    ext = token._extensions_claim(extensions)
     expires, nbf = token._validity(ttl, expiry, not_before, now)
     if not expires:
         raise ValissError("valiss: message tokens must carry an expiry (ttl or expiry)")
@@ -111,10 +117,6 @@ def issue_message(
     if epoch:
         body["epoch"] = epoch
     if checksum:
-        if not _is_hex_sha256(checksum):
-            raise ValissError(
-                "valiss: checksum must be the lowercase-hex SHA-256 of the payload"
-            )
         body["checksum"] = checksum
     if chain is not None:
         account_token, user_token = chain
@@ -125,7 +127,7 @@ def issue_message(
         if user_token:
             ch["user"] = user_token
         body["chain"] = ch
-    if ext := token._extensions_claim(extensions):
+    if ext:
         body["ext"] = ext
     return token._encode_v1(
         user, body, subject=user.public_key, audience=audience,
@@ -201,7 +203,13 @@ def verify_message(
     # then the emitter's user token against the account. VerifyAccount/User
     # raise the same reason codes they would at top level.
     account = token.verify_account(chain_account, operator_pub_key)
-    operator = token.verify_operator(operator_token, operator_pub_key) if operator_token else None
+    # Go keys operator enforcement on the presence of the option, not its value,
+    # so an operator token is verified whenever one is supplied.
+    operator = (
+        token.verify_operator(operator_token, operator_pub_key)
+        if operator_token is not None
+        else None
+    )
 
     user = token.verify_user(chain_user, account.subject)
     if user.subject != d.issuer:
@@ -257,7 +265,8 @@ def verify_message(
     if claims.not_yet_valid(at, skew):
         raise ValissError("valiss: message token not yet valid", reason=Reason.NOT_YET_VALID)
 
-    if audience is not None and claims.audience != audience:
+    # An empty audience is a no-op, matching Go's `cfg.audience != ""` guard.
+    if audience and claims.audience != audience:
         raise ValissError(
             f"valiss: message token audience {claims.audience!r}, expected {audience!r}",
             reason=Reason.WRONG_AUDIENCE,

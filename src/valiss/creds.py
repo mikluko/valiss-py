@@ -19,6 +19,7 @@ otherwise identical.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from . import nkeys
@@ -28,6 +29,9 @@ from .errors import Reason, ValissError
 # on parse, independent of the wire version of the tokens the file carries.
 _CREDS_VERSION = 1
 _CREDS_VERSION_MARKER = "VALISS-CREDS-VERSION:"
+
+# Go's strconv.Atoi accepts ASCII digits with an optional leading sign only.
+_VERSION_VALUE = re.compile(r"[+-]?[0-9]+")
 
 _ACCOUNT_TOKEN_BEGIN = "-----BEGIN VALISS ACCOUNT TOKEN-----"
 _ACCOUNT_TOKEN_END = "------END VALISS ACCOUNT TOKEN------"
@@ -108,17 +112,19 @@ def _check_version(contents: str) -> None:
     does not implement. An absent header is read as the current version. It is
     checked before the payload, so an incompatible file is rejected cleanly
     rather than mis-parsed."""
-    for line in contents.splitlines():
+    for line in contents.split("\n"):
         rest = line.strip()
         if not rest.startswith(_CREDS_VERSION_MARKER):
             continue
         value = rest[len(_CREDS_VERSION_MARKER):].strip()
-        try:
-            version = int(value)
-        except ValueError as exc:
+        # Go parses the value with strconv.Atoi: ASCII digits with an optional
+        # sign only. Reject underscores and Unicode digits that Python's int()
+        # would otherwise accept.
+        if _VERSION_VALUE.fullmatch(value) is None:
             raise ValissError(
                 f"valiss: creds: malformed version {value!r}", reason=Reason.MALFORMED
-            ) from exc
+            )
+        version = int(value)
         if version != _CREDS_VERSION:
             raise ValissError(
                 f"valiss: creds: unsupported version {version}", reason=Reason.UNSUPPORTED_VERSION
@@ -136,7 +142,7 @@ def _between(contents: str, begin: str, end: str, what: str) -> tuple[str, bool]
     confusing cryptographic error."""
     inside = False
     payload = ""
-    for line in contents.splitlines():
+    for line in contents.split("\n"):
         line = line.strip()
         if line == begin:
             inside = True

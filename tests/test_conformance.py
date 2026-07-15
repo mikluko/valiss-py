@@ -29,18 +29,23 @@ _VECTORS_DIR = Path(os.environ.get("VALISS_VECTORS_DIR") or Path(__file__).paren
 
 _CATEGORY_FILES = ["tokens.json", "signatures.json", "creds.json", "messages.json"]
 
-_DURATION_UNITS = {"s": "seconds", "m": "minutes", "h": "hours"}
+# Go time.Duration units, in seconds. "ms" must be matched before "s"/"m".
+_DURATION_UNITS = {
+    "ns": 1e-9, "us": 1e-6, "µs": 1e-6, "ms": 1e-3, "s": 1.0, "m": 60.0, "h": 3600.0,
+}
+_DURATION_TERM = re.compile(r"(\d+(?:\.\d+)?)(ns|us|µs|ms|s|m|h)")
+_DURATION = re.compile(r"([+-]?)((?:\d+(?:\.\d+)?(?:ns|us|µs|ms|s|m|h))+)$")
 
 
 def _parse_duration(s: str) -> timedelta:
-    """Parse a Go-style duration made of ``<number><unit>`` terms (e.g. ``2m``,
-    ``1h30m``); enough for the ``skew`` values the vectors carry."""
-    kwargs: dict[str, float] = {}
-    for value, unit in re.findall(r"(\d+(?:\.\d+)?)([smh])", s):
-        kwargs[_DURATION_UNITS[unit]] = kwargs.get(_DURATION_UNITS[unit], 0.0) + float(value)
-    if not kwargs:
+    """Parse a Go time.ParseDuration string (e.g. ``2m``, ``1h30m``, ``300ms``,
+    ``-5s``) into a timedelta, so a vector's ``skew`` maps to the exact window
+    Go used regardless of the unit it was emitted with."""
+    m = _DURATION.fullmatch(s)
+    if m is None:
         raise ValueError(f"unparsable duration {s!r}")
-    return timedelta(**kwargs)
+    total = sum(float(value) * _DURATION_UNITS[unit] for value, unit in _DURATION_TERM.findall(m.group(2)))
+    return timedelta(seconds=(-total if m.group(1) == "-" else total))
 
 
 def _parse_time(s: str) -> datetime:
