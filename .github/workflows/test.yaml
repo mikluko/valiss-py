@@ -38,10 +38,17 @@ jobs:
       working-directory: valiss-py
       run: uv sync --all-extras
 
+    - name: Type check
+      working-directory: valiss-py
+      run: uv run pyright src/valiss
+
     - name: Test
       working-directory: valiss-py
       run: uv run pytest -v
 
     - name: Run examples
       working-directory: valiss-py
-      run: uv run --group dev examples/issue_user.py
+      run: |
+        uv run --group dev examples/issue_user.py
+        uv run --group dev examples/verify_request.py
+        uv run --group dev examples/verify_tooling.py

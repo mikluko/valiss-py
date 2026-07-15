@@ -14,15 +14,22 @@ request signatures, message tokens, and header names interchange freely, proven
 against the shared conformance vectors. `SPEC-1.md` is the normative wire
 description; where it and the Go code disagree, the code is canonical.
 
-The port is deliberately partial: it mints tokens (all levels, including
-bearer user tokens and message tokens) and attaches credentials to clients.
-The full request Verifier — allowlists, epoch policy, extension enforcement,
-transport middleware — stays with the Go implementation. The `verify_*`
-helpers in `valiss.token` check a single token's signature/type/issuer for
-tooling and tests only; do not grow them into a Verifier.
-`valiss.message.verify_message` is the one full-chain verifier here, because a
-message token is offline-verifiable by design (operator → account → user →
-message, no allowlist).
+The port mints tokens (all levels, including bearer user tokens and message
+tokens), attaches credentials to clients, and — as of the server-side work —
+verifies requests itself. `valiss.verifier.Verifier` is the integrated
+single-anchor request verifier (chain + allowlist/revocation + epoch policy +
+replay + extension enforcement + custom validators), backed by
+`valiss.allowlist` and `valiss.replay`. Still on the Go side and not yet
+ported: the multi-operator keyring, and the transport middleware/interceptors
+(HTTP, gRPC) and message-token transports (httpsig/grpcsig) — these land in
+later chunks.
+
+The per-token `verify_*` helpers in `valiss.token` stay narrow: they check a
+single token's signature/type/issuer for tooling and inspection; the Verifier
+composes them, so do not fold chain/allowlist/epoch logic back into them.
+`valiss.message.verify_message` remains the full-chain verifier for message
+tokens, offline-verifiable by design (operator → account → user → message, no
+allowlist).
 
 ## Wire version and reason codes
 
@@ -73,6 +80,14 @@ Module map (Go package → Python module):
 - root package (`message.go`) → `valiss.message` — `issue_message` and the
   full-chain `verify_message` (Go `IssueMessage`/`VerifyMessage`), plus
   `checksum` and `MessageClaims`.
+- root package (`verifier.go`) → `valiss.verifier` — `Verifier` (single-anchor;
+  `.validator`/`.extension` decorators; `verify`/`__call__`), `Request`,
+  `Identity`, `static_account_tokens`. Go functional options become keyword
+  args (`skew`, `clock`, `resolver`, `replay_cache`, `operator_token`,
+  `validators`, `extension_types`).
+- `allowlist.go` → `valiss.allowlist` — `Allowlist` protocol (`in`),
+  `StaticAllowlist` (set-like, `.from_file`), `ALLOW_ALL`.
+- `replay.go` → `valiss.replay` — `ReplayCache` protocol, `MemoryReplayCache`.
 - `creds` → `valiss.creds` — creds file, byte-compatible markers and the
   `VALISS-CREDS-VERSION` line.
 - nkeys (vendored subset) → `valiss.nkeys` — base32 + CRC16 encode/decode,
