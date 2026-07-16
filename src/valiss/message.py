@@ -25,6 +25,7 @@ from typing import Any
 
 from . import nkeys, token
 from .errors import Reason, ValissError
+from .keyring import Keyring
 
 # The validity window the contrib transports mint message tokens with: long
 # enough for delivery latency and clock drift, short enough to bound capture
@@ -137,8 +138,9 @@ def issue_message(
 
 def verify_message(
     tok: str,
-    operator_pub_key: str,
+    operator_pub_key: str | None = None,
     *,
+    keyring: Keyring | None = None,
     now: datetime | None = None,
     skew: timedelta = token.DEFAULT_SKEW,
     audience: str | None = None,
@@ -147,21 +149,30 @@ def verify_message(
     chain: tuple[str, str] | None = None,
     operator_token: str | None = None,
 ) -> MessageClaims:
-    """Verify a per-message proof of origin against the pinned operator public
-    key: walk the chain operator → account → user → message, require all levels
-    to agree on the epoch, check every validity window at the verification
-    instant (``now``; default now), and enforce the bindings requested.
+    """Verify a per-message proof of origin: walk the chain operator → account →
+    user → message, require all levels to agree on the epoch, check every
+    validity window at the verification instant (``now``; default now), and
+    enforce the bindings requested.
+
+    Supply exactly one trust anchor: ``operator_pub_key`` (a single pinned
+    operator) or ``keyring=`` (several trusted operators; the chain's issuer and
+    epoch select the entry, whose policy is always enforced — an unknown pair is
+    rejected). ``operator_token`` enforces the single-anchor operator's policy
+    (window and epoch) and does not combine with a keyring.
 
     ``audience`` requires the token be bound to exactly that destination (a
     token bound elsewhere, or to nothing, is rejected). ``payload`` requires the
     token's checksum to match the bytes; ``require_checksum`` insists a checksum
     is present without comparing bytes. ``chain=(account_token, user_token)``
     supplies the provenance chain out of band for a token minted without one; a
-    token that embeds a chain must embed this exact chain. ``operator_token``
-    enforces the trust domain's operator policy (window and epoch).
+    token that embeds a chain must embed this exact chain.
 
     A verified message token proves origin only. It is not a credential.
     """
+    if (operator_pub_key is None) == (keyring is None):
+        raise ValissError(
+            "valiss: verify_message requires exactly one of operator_pub_key or keyring"
+        )
     d = token._decode_token(tok)
     if d.type != token._MESSAGE_TYPE:
         raise ValissError(f"valiss: not a message token (type {d.type!r})", reason=Reason.WRONG_TYPE)
@@ -199,17 +210,34 @@ def verify_message(
 
     at = now or token._now()
 
-    # Anchor: verify the chain's account token against the pinned operator key,
-    # then the emitter's user token against the account. VerifyAccount/User
-    # raise the same reason codes they would at top level.
-    account = token.verify_account(chain_account, operator_pub_key)
-    # Go keys operator enforcement on the presence of the option, not its value,
-    # so an operator token is verified whenever one is supplied.
-    operator = (
-        token.verify_operator(operator_token, operator_pub_key)
-        if operator_token is not None
-        else None
-    )
+    # Anchor: verify the chain's account token against the trust anchor (the
+    # pinned operator key, or the keyring entry the chain names), then the
+    # emitter's user token against the account. VerifyAccount/User raise the
+    # same reason codes they would at top level.
+    if keyring is not None:
+        if operator_token is not None:
+            raise ValissError(
+                "valiss: operator policy applies to single-anchor verification; "
+                "keyring entries carry policy"
+            )
+        issuer = token.issuer_of(chain_account)
+        account = token.verify_account(chain_account, issuer)
+        operator = keyring.get(issuer, account.epoch)
+        if operator is None:
+            raise ValissError(
+                f"valiss: no trusted operator {issuer} at epoch {account.epoch}",
+                reason=Reason.UNKNOWN_OPERATOR,
+            )
+    else:
+        assert operator_pub_key is not None  # guaranteed by the anchor guard above
+        account = token.verify_account(chain_account, operator_pub_key)
+        # Go keys operator enforcement on the presence of the option, not its
+        # value, so an operator token is verified whenever one is supplied.
+        operator = (
+            token.verify_operator(operator_token, operator_pub_key)
+            if operator_token is not None
+            else None
+        )
 
     user = token.verify_user(chain_user, account.subject)
     if user.subject != d.issuer:
