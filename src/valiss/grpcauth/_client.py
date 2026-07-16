@@ -1,61 +1,26 @@
-"""gRPC client side of the valiss authentication scheme: call credentials
-that attach the creds' tokens and, when the creds hold a seed, a fresh
-per-call signature. ``Ext`` is the gRPC transport extension claim Go
-servers enforce; mint it into tokens with
-``token.issue_user(..., extensions=[Ext(...)])``.
+"""gRPC client credential attachment: per-call credentials that attach the
+creds' tokens and, when the creds hold a seed, a fresh per-call signature bound
+to the called method.
 
 Requires the ``grpc`` extra (grpcio).
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from collections.abc import Callable
 from datetime import datetime
-from typing import Any
 
 import grpc
 
-from . import creds, token
-from .errors import ValissError
-
-
-@dataclass
-class Ext:
-    """gRPC transport extension claim: binds a token to specific methods.
-
-    Enforcement on the Go server is fail-closed: every token in the chain
-    must carry the extension (unless the Authenticator allows missing
-    ones), an empty methods list grants nothing, and allow-all is the
-    explicit wildcard ``Ext(methods=["*"])``.
-    """
-
-    # methods allowed, as gRPC full method names, e.g.
-    # "/example.v1.WidgetService/CreateWidget". A trailing "*" is a prefix
-    # wildcard: "/example.v1.WidgetService/*" covers the whole service and
-    # "*" covers everything. Empty grants nothing.
-    methods: list[str] = field(default_factory=list)
-
-    def extension_name(self) -> str:
-        return "grpc"
-
-    def extension_payload(self) -> Mapping[str, Any]:
-        return {"methods": self.methods} if self.methods else {}
-
-
-def method_context(full_method: str, nonce: str = "") -> bytes:
-    """Canonical request-context bytes for a gRPC full method (e.g.
-    ``/example.v1.WidgetService/CreateWidget``) and per-request nonce (empty
-    when replay suppression is not in use). Binding the signature to the
-    full method stops a captured signature from authorizing a different
-    RPC; the Go interceptor reconstructs the same bytes."""
-    return f"grpc\n{full_method}\n{nonce}".encode()
+from .. import creds, token
+from ..errors import ValissError
+from .extension import method_context
 
 
 def _full_method(context: grpc.AuthMetadataContext) -> str:
     """gRPC full method from the plugin's metadata context. service_url is
-    ``scheme://authority/package.Service``; the interceptor sees the same
-    as ``/package.Service/Method``."""
+    ``scheme://authority/package.Service``; the interceptor sees the same as
+    ``/package.Service/Method``."""
     service = context.service_url.rsplit("/", 1)[-1]
     return f"/{service}/{context.method_name}"
 
@@ -102,13 +67,13 @@ class _CredentialsPlugin(grpc.AuthMetadataPlugin):
 def call_credentials(
     c: creds.Creds, *, nonce: bool = False, now: Callable[[], datetime] | None = None
 ) -> grpc.CallCredentials:
-    """Client call credentials from creds: the account token, the optional
-    user token, and per-call signatures from the seed (absent for bearer
-    creds), bound to the called method.
+    """Client call credentials from creds: the account token, the optional user
+    token, and per-call signatures from the seed (absent for bearer creds), bound
+    to the called method.
 
-    ``nonce=True`` attaches a fresh per-call nonce (folded into the
-    signature) so a server with a replay cache can suppress replays; enable
-    it whenever the server has one.
+    ``nonce=True`` attaches a fresh per-call nonce (folded into the signature) so
+    a server with a replay cache can suppress replays; enable it whenever the
+    server has one.
 
     gRPC sends call credentials only over secure channels; for local
     plaintext-equivalent transports compose with

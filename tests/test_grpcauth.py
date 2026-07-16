@@ -6,6 +6,7 @@ import pytest
 from grpc_health.v1 import health, health_pb2, health_pb2_grpc
 
 from valiss import creds, grpcauth, nkeys, token
+from valiss.grpcauth._client import _CredentialsPlugin
 
 NOW = datetime(2026, 7, 10, 12, 0, 0, tzinfo=timezone.utc)
 TTL = timedelta(minutes=15)
@@ -54,7 +55,7 @@ FULL_METHOD = "/grpc.health.v1.Health/Check"
 
 
 def test_plugin_metadata_signing(user_creds, user):
-    plugin = grpcauth._CredentialsPlugin(user_creds, nonce=False, now=lambda: NOW)
+    plugin = _CredentialsPlugin(user_creds, nonce=False, now=lambda: NOW)
     cb = _Capture()
     plugin(_FakeContext(), cb)
     assert cb.error is None
@@ -71,7 +72,7 @@ def test_plugin_metadata_signing(user_creds, user):
 
 
 def test_plugin_metadata_nonce(user_creds, user):
-    plugin = grpcauth._CredentialsPlugin(user_creds, nonce=True, now=lambda: NOW)
+    plugin = _CredentialsPlugin(user_creds, nonce=True, now=lambda: NOW)
     cb = _Capture()
     plugin(_FakeContext(), cb)
     assert cb.error is None
@@ -93,7 +94,7 @@ def test_plugin_metadata_bearer(operator, account, user):
         ),
     )
     cb = _Capture()
-    grpcauth._CredentialsPlugin(c, nonce=False, now=None)(_FakeContext(), cb)
+    _CredentialsPlugin(c, nonce=False, now=None)(_FakeContext(), cb)
     assert cb.error is None
     assert token.HEADER_TIMESTAMP not in cb.metadata
     assert token.HEADER_SIGNATURE not in cb.metadata
